@@ -1,0 +1,553 @@
+require('dotenv').config();
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Events,
+  ChannelType,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+  REST,
+StringSelectMenuBuilder,
+  Routes,
+  Collection
+} = require('discord.js'); 
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences
+  ],
+});
+
+client.commands = new Collection();
+
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+
+// ---------- Temporäre Datenbanken ----------
+let warnDb = {};
+let countingChannels = new Map();
+let economyDb = {};
+let activeBlackjackGames = new Map();
+let guildStats = new Map();
+let verifySettings = new Map();
+const teamlistMessages = new Map();
+// ---------- Ticket System ----------
+const userTickets = new Map();
+const ticketClaimers = new Map();
+const ticketSettings = new Map();
+
+// ---------- Helper Functions ----------
+function getUserData(userId) {
+  if (!economyDb[userId]) economyDb[userId] = { wallet: 1000, bank: 0, lastDaily: 0 };
+  return economyDb[userId];
+}
+
+function drawCard() {
+  const cards = ['2','3','4','5','6','8','9','10','J','Q','K','18'];
+  return cards[Math.floor(Math.random() * cards.length)];
+}
+
+function cardValue(card) {
+  if (card === '18') return 18;
+  if (['J','Q','K'].includes(card)) return 10;
+  return parseInt(card);
+}
+
+function handValue(hand) {
+  return hand.reduce((sum, c) => sum + cardValue(c), 0);
+}
+
+// ---------- Slash Commands ----------
+const commands = [
+  // Moderation
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Kicke einen User')
+    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
+    .addUserOption(opt => opt.setName('user').setDescription('User auswählen').setRequired(true))
+    .addStringOption(opt => opt.setName('reason').setDescription('Grund').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Banne einen User')
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+    .addUserOption(opt => opt.setName('user').setDescription('User auswählen').setRequired(true))
+    .addStringOption(opt => opt.setName('reason').setDescription('Grund').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('warn')
+    .setDescription('Verwarne einen User')
+    .addUserOption(opt => opt.setName('user').setDescription('User auswählen').setRequired(true))
+    .addStringOption(opt => opt.setName('reason').setDescription('Grund der Verwarnung').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('warns')
+    .setDescription('Zeige die Warns eines Users')
+    .addUserOption(opt => opt.setName('user').setDescription('User auswählen').setRequired(true)),
+
+  // Economy
+  new SlashCommandBuilder()
+    .setName('balance')
+    .setDescription('Zeige dein Guthaben an')
+    .addUserOption(opt => opt.setName('user').setDescription('User auswählen').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('daily')
+    .setDescription('Hole dein tägliches Guthaben ab'),
+
+  new SlashCommandBuilder()
+    .setName('work')
+    .setDescription('Arbeite und verdiene Geld!'),
+
+  new SlashCommandBuilder()
+    .setName('pay')
+    .setDescription('Zahle einem User Geld')
+    .addUserOption(opt => opt.setName('user').setDescription('User auswählen').setRequired(true))
+    .addIntegerOption(opt => opt.setName('amount').setDescription('Betrag').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('shopbuy')
+    .setDescription('Kaufe ein Item aus dem Shop')
+    .addStringOption(opt => opt.setName('item').setDescription('Item auswählen').setRequired(true))
+    .addIntegerOption(opt => opt.setName('amount').setDescription('Anzahl').setRequired(true)),
+
+  // Casino Games
+  new SlashCommandBuilder()
+    .setName('coinflip')
+    .setDescription('Coinflip Spiel')
+    .addStringOption(opt => opt.setName('choice').setDescription('Heads oder Tails').setRequired(true)
+      .addChoices({name:'Heads',value:'heads'},{name:'Tails',value:'tails'}))
+    .addIntegerOption(opt => opt.setName('amount').setDescription('Betrag').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('roulette')
+    .setDescription('Roulette Spiel')
+    .addStringOption(opt => opt.setName('bet').setDescription('Red, Black oder Zahl (1-36)').setRequired(true))
+    .addIntegerOption(opt => opt.setName('amount').setDescription('Betrag').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('blackjack')
+    .setDescription('Starte ein Blackjack Spiel')
+    .addIntegerOption(opt => opt.setName('amount').setDescription('Einsatzbetrag').setRequired(true)),
+
+  // Serverstats
+  new SlashCommandBuilder()
+    .setName('serverstats')
+    .setDescription('Erstellt dynamische Server-Statistiken Channels')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  // Verify System
+  new SlashCommandBuilder()
+    .setName('verify-setup')
+    .setDescription('Richte das Verify-System ein')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addRoleOption(opt => opt.setName('role').setDescription('Rolle für Verifizierung').setRequired(true)),
+
+  // Counting
+  new SlashCommandBuilder()
+    .setName('counting')
+    .setDescription('Setze einen Kanal für das Zählen')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption(opt => opt.setName('channel')
+      .setDescription('Wähle den Kanal, in dem gezählt werden darf')
+      .setRequired(true)
+      .addChannelTypes(ChannelType.GuildText)),
+
+new SlashCommandBuilder()
+  .setName('ticket')
+  .setDescription('Richte das Ticket-System ein')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+  .addChannelOption(opt =>
+    opt.setName('category')
+      .setDescription('Ticket Kategorie')
+      .setRequired(true)
+      .addChannelTypes(ChannelType.GuildCategory))
+  .addChannelOption(opt =>
+    opt.setName('log_channel')
+      .setDescription('Log Kanal')
+      .setRequired(true)
+      .addChannelTypes(ChannelType.GuildText)),
+
+];
+
+// ---------- Slash Command Registrierung ----------
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+(async () => {
+  try {
+    console.log('🚀 Registriere Slash Commands...');
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands.map(cmd => cmd.toJSON()) });
+    console.log('✅ Slash Commands registriert!');
+  } catch (err) {
+    console.error(err);
+  }
+})();
+
+// ---------- Ready ----------
+client.once('ready', () => {
+  console.log(`🟢 Bot online als ${client.user.tag}`);
+});
+
+// ---------- Helper: Serverstats ----------
+async function updateServerStats(guild) {
+  const stats = guildStats.get(guild.id);
+  if (!stats) return;
+
+  const boostChannel = guild.channels.cache.get(stats.boostChannelId);
+  const memberChannel = guild.channels.cache.get(stats.memberChannelId);
+
+  if (boostChannel) boostChannel.setName(`Boosts: ${guild.premiumSubscriptionCount}`).catch(() => {});
+  if (memberChannel) memberChannel.setName(`Mitglieder: ${guild.memberCount}`).catch(() => {});
+}
+
+// ---------- Interaction Handler ----------
+client.on(Events.InteractionCreate, async interaction => {
+  try {
+    const user = interaction.user;
+    const guild = interaction.guild;
+
+    // ---------- Counting Setup ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === 'counting') {
+      const channel = interaction.options.getChannel('channel');
+      if (!channel || channel.type !== ChannelType.GuildText) {
+        return interaction.reply({ content: '❌ Bitte wähle einen gültigen Textkanal aus!', ephemeral: true });
+      }
+      countingChannels.set(channel.id, { current: 0, lastUserId: null });
+      return interaction.reply({ content: `✅ Counting-Kanal gesetzt: ${channel}`, ephemeral: true });
+    }
+
+    // ---------- Serverstats ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === 'serverstats') {
+      let boostChannel = guild.channels.cache.find(c => c.name.startsWith('Boosts:'));
+      let memberChannel = guild.channels.cache.find(c => c.name.startsWith('Mitglieder:'));
+
+      if (!boostChannel) boostChannel = await guild.channels.create({
+        name: `Boosts: ${guild.premiumSubscriptionCount}`,
+        type: ChannelType.GuildVoice,
+        permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.Connect] }]
+      });
+
+      if (!memberChannel) memberChannel = await guild.channels.create({
+        name: `Mitglieder: ${guild.memberCount}`,
+        type: ChannelType.GuildVoice,
+        permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.Connect] }]
+      });
+
+      guildStats.set(guild.id, { boostChannelId: boostChannel.id, memberChannelId: memberChannel.id });
+      return interaction.reply({ content: '✅ Serverstats Channels erstellt/aktualisiert!', ephemeral: true });
+    }
+
+    // ---------- Blackjack ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === 'blackjack') {
+      const bet = interaction.options.getInteger('amount');
+      const data = getUserData(user.id);
+      if (bet > data.wallet) return interaction.reply({ content: '❌ Nicht genug Coins!', ephemeral: true });
+      if (activeBlackjackGames.has(user.id)) return interaction.reply({ content: '❌ Du hast noch ein laufendes Spiel!', ephemeral: true });
+
+      const playerCards = [drawCard(), drawCard()];
+      const dealerCards = [drawCard()];
+      activeBlackjackGames.set(user.id, { playerCards, dealerCards, bet, finished: false });
+
+      const embed = new EmbedBuilder()
+        .setTitle('🃏 Blackjack')
+        .setDescription(`Dein Wert: ${handValue(playerCards)}\nDealer: ?`)
+        .setFooter({ text: `Einsatz: ${bet} Coins` })
+        .setColor(0x1abc9c);
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hit').setLabel('Hit').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('stand').setLabel('Stand').setStyle(ButtonStyle.Secondary)
+      );
+
+      return interaction.reply({ embeds: [embed], components: [buttons] });
+    }
+
+    // ---------- Verify Setup ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === 'verify-setup') {
+      const role = interaction.options.getRole('role');
+      verifySettings.set(guild.id, { roleId: role.id });
+
+      const embed = new EmbedBuilder()
+        .setTitle('🔹 Willkommen auf unserem Server!')
+        .setDescription(
+`**Schritt 1:** Klicke auf den Button unten, um dich zu verifizieren.
+**Schritt 2:** Warte einen kurzen Moment, während dein Zugang freigeschaltet wird.
+**Schritt 3:** Nach erfolgreicher Verifikation erhältst du die Rolle **${role.name}** und kannst alle Bereiche nutzen.
+
+⚠️ Hinweis: Dies dient dazu, Spam-Bots fernzuhalten und unsere Community sicher zu halten.
+✨ Vielen Dank, dass du dich verifizierst und Teil unserer Community wirst!`)
+        .setColor(0x1abc9c)
+        .setThumbnail('https://cdn.discordapp.com/attachments/108000000000000000/108000000000000000/banner.png')
+        .setFooter({ text: 'Verifizierungssystem', iconURL: guild.iconURL() });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('verify-button').setLabel('✅ Jetzt verifizieren').setStyle(ButtonStyle.Success)
+      );
+
+      return interaction.reply({ embeds: [embed], components: [row], ephemeral: false });
+    }
+
+    // ---------- Verify Button ----------
+    if (interaction.isButton() && interaction.customId === 'verify-button') {
+      const settings = verifySettings.get(guild.id);
+      if (!settings) return interaction.reply({ content: '❌ Kein Verify-System eingerichtet.', ephemeral: true });
+
+      await interaction.member.roles.add(settings.roleId);
+      return interaction.reply({ content: '✅ Du wurdest erfolgreich verifiziert!', ephemeral: true });
+    }
+
+  } catch (err) {
+    console.error(err);
+  }
+// ================= TICKET SYSTEM =================
+const userId = interaction.user.id;
+const guildId = interaction.guild.id;
+
+// ---------- Ticket Setup ----------
+if (interaction.isChatInputCommand() && interaction.commandName === 'ticket') {
+  const category = interaction.options.getChannel('category');
+  const logChannel = interaction.options.getChannel('log_channel');
+
+  if (!category || category.type !== ChannelType.GuildCategory || !logChannel) {
+    return interaction.reply({ content: '❌ Ungültige Kategorie oder Log-Kanal.', ephemeral: true });
+  }
+
+  // Ticket-Einstellungen speichern
+  ticketSettings.set(guildId, { 
+    categoryId: category.id, 
+    logChannelId: logChannel.id, 
+    staffRoleId: '1441888264259895324' // Team-Rolle
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle('🎫 Willkommen in unserem Ticket-System!')
+    .setDescription(
+`Willkommen in unserem Ticket-System!
+
+Bitte wähle die passende Kategorie für dein Anliegen aus.  
+Unser Team wird deine Anfrage so schnell wie möglich prüfen und sich umgehend bei dir zurückmelden.
+
+Damit wir dir effizient und gezielt weiterhelfen können, gib bitte so viele Details wie möglich an.  
+Je genauer die Informationen, desto schneller können wir eine Lösung finden.
+
+Vielen Dank für dein Vertrauen – wir freuen uns darauf, dir weiterzuhelfen!`
+    )
+    .setColor(0x1abc9c)
+    .setImage(interaction.guild.iconURL({ size: 1024 }));
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId('ticket-select')
+    .setPlaceholder('📩 Wähle eine Ticket-Kategorie')
+    .addOptions([
+      { label: 'Support', description: 'Allgemeine Hilfe & Fragen', value: 'ticket-support', emoji: '💬' },
+      { label: 'High Team', description: 'Wichtige / dringende Anliegen', value: 'ticket-high', emoji: '🚨' },
+      { label: 'Report', description: 'Melde einen User oder Vorfall', value: 'ticket-report', emoji: '⚠️' }
+    ]);
+
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+
+  return interaction.reply({ embeds: [embed], components: [row] });
+}
+
+// ---------- Ticket Panel Interaction ----------
+const settings = ticketSettings.get(guildId);
+if (!settings) return;
+
+if (interaction.isStringSelectMenu() && interaction.customId === 'ticket-select') {
+  const category = interaction.guild.channels.cache.get(settings.categoryId);
+  if (!category)
+    return interaction.reply({ content: '❌ Ticket-Kategorie fehlt.', ephemeral: true });
+
+  const selected = interaction.values[0];
+  const type = selected.split('-')[1];
+
+  const member = await interaction.guild.members.fetch(userId); // User, der Ticket erstellt
+  const staffRole = interaction.guild.roles.cache.get(settings.staffRoleId); // Team-Rolle
+
+  const channel = await interaction.guild.channels.create({
+    name: `ticket-${userId}-${type}`,
+    type: ChannelType.GuildText,
+    parent: category.id,
+    permissionOverwrites: [
+      { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+      { id: staffRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
+    ]
+  });
+
+  // Kein Limit mehr pro User
+  if (!userTickets.has(userId)) userTickets.set(userId, []);
+  userTickets.get(userId).push(channel.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🎫 ${type.toUpperCase()} Ticket`)
+    .setDescription(`<@${userId}> dein Ticket wurde erstellt.\nBitte beschreibe dein Anliegen so genau wie möglich.`)
+    .setColor(0x1abc9c);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket-claim').setLabel('📌 Claim').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('ticket-close').setLabel('🔒 Schließen').setStyle(ButtonStyle.Danger)
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+  return interaction.reply({ content: `✅ Ticket erstellt: ${channel}`, ephemeral: true });
+}
+
+// ---------- Claim ----------
+if (interaction.isButton() && interaction.customId === 'ticket-claim') {
+  const message = interaction.message;
+
+  if (message.embeds[0]?.fields?.some(f => f.name === 'Gekclaimed von')) {
+    return interaction.reply({ content: '❌ Dieses Ticket wurde bereits übernommen.', ephemeral: true });
+  }
+
+  const embed = EmbedBuilder.from(message.embeds[0])
+    .setAuthor({ name: interaction.user.tag, iconURL: interaction.user.displayAvatarURL() })
+    .addFields({ name: 'Gekclaimed von', value: `<@${userId}>` })
+    .setColor(0x3498db);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket-unclaim').setLabel('📌 Unclaim').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ticket-close').setLabel('🔒 Schließen').setStyle(ButtonStyle.Danger)
+  );
+
+  await message.edit({ embeds: [embed], components: [row] });
+  await interaction.channel.send(`✅ ${interaction.user.tag} hat dieses Ticket übernommen!`);
+  return interaction.reply({ content: '✅ Du hast das Ticket übernommen!', ephemeral: true });
+}
+
+// ---------- Unclaim ----------
+if (interaction.isButton() && interaction.customId === 'ticket-unclaim') {
+  const message = interaction.message;
+  const embed = EmbedBuilder.from(message.embeds[0]);
+
+  embed.data.fields = embed.data.fields?.filter(f => f.name !== 'Gekclaimed von') || [];
+  embed.setAuthor(null);
+  embed.setColor(0x1abc9c);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket-claim').setLabel('📌 Claim').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('ticket-close').setLabel('🔒 Schließen').setStyle(ButtonStyle.Danger)
+  );
+
+  await message.edit({ embeds: [embed], components: [row] });
+  return interaction.reply({ content: '✅ Ticket freigegeben!', ephemeral: true });
+}
+
+// ---------- Close ----------
+if (interaction.isButton() && interaction.customId === 'ticket-close') {
+  await interaction.reply({ content: '✅ Ticket wird gelöscht...', ephemeral: true });
+  setTimeout(() => interaction.channel.delete().catch(console.error), 1000);
+}
+
+// =================================================
+});
+
+// ---------- Member Events für Serverstats ----------
+client.on('guildMemberAdd', member => updateServerStats(member.guild));
+client.on('guildMemberRemove', member => updateServerStats(member.guild));
+client.on('guildMemberUpdate', (oldMember, newMember) => {
+  if (oldMember.premiumSince !== newMember.premiumSince) updateServerStats(newMember.guild);
+});
+
+// ---------- Teamlist Update ----------
+async function updateTeamlist(guild, channel) {
+  if (!channel) return;
+  let message;
+  const savedMsgId = teamlistMessages.get(guild.id);
+  if (savedMsgId) message = await channel.messages.fetch(savedMsgId).catch(() => null);
+
+  const rolesToCheck = [
+    { name: 'Server Owner', id: '1441888264284930283' },
+    { name: 'Co Owner', id: '1441888264284930282' },
+    { name: 'Projektleitung', id: '1441888264284930281' },
+    { name: 'Stv. Projektleitung', id: '1441888264284930279' },
+    { name: 'Teamleitung', id: '1441888264272220269' },
+    { name: 'Stv. Teamleitung', id: '1441888264272220268' },
+    { name: 'Senior Admin', id: '1441888264272220266' },
+    { name: 'Admin', id: '1441888264272220265' },
+    { name: 'Test Admin', id: '1441888264272220264' },
+    { name: 'Senior Mod', id: '1441888264272220262' },
+    { name: 'Mod 2', id: '1441888264272220261' },
+    { name: 'Mod 1', id: '1441888264272220260' },
+    { name: 'Test Mod', id: '1441888264259895325' }
+  ];
+
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Teamliste')
+    .setColor(0x1abc9c)
+    .setFooter({ text: 'Automatisch aktualisiert', iconURL: guild.iconURL() })
+    .setTimestamp();
+
+  for (const roleInfo of rolesToCheck) {
+    const role = guild.roles.cache.get(roleInfo.id);
+    if (!role) continue;
+    const members = role.members.map(m => {
+      const status = m.presence?.status === 'online' ? '🟢' : '🔴';
+      return `${status} ${m.user.tag}`;
+    });
+    embed.addFields({ name: `${role.name} (${members.length})`, value: members.length > 0 ? members.join('\n') : 'Keine Mitglieder', inline: false });
+  }
+
+  if (message) await message.edit({ embeds: [embed] });
+  else {
+    message = await channel.send({ embeds: [embed] });
+    teamlistMessages.set(guild.id, message.id);
+  }
+}
+
+// ---------- Presence & Role Updates ----------
+client.on('presenceUpdate', (oldPresence, newPresence) => {
+  if (!newPresence.guild) return;
+  const channel = newPresence.guild.channels.cache.find(c => c.isTextBased() && teamlistMessages.has(newPresence.guild.id));
+  if (channel) updateTeamlist(newPresence.guild, channel);
+});
+
+client.on('guildMemberUpdate', (oldMember, newMember) => {
+  if (!oldMember.guild) return;
+  if (oldMember.roles.cache.size === newMember.roles.cache.size) return;
+  const channel = oldMember.guild.channels.cache.find(c => c.isTextBased() && teamlistMessages.has(oldMember.guild.id));
+  if (channel) updateTeamlist(oldMember.guild, channel);
+});
+
+// ---------- Counting Logic ----------
+client.on('messageCreate', async message => {
+  if (message.author.bot) return;
+  const counting = countingChannels.get(message.channel.id);
+  if (!counting) return;
+
+  const num = parseInt(message.content);
+  if (isNaN(num)) {
+    await message.react('❌').catch(() => {});
+    await message.delete().catch(() => {});
+    return message.channel.send('❌ Bitte nur die nächste Zahl posten!').then(msg => setTimeout(() => msg.delete().catch(() => {}), 3000));
+  }
+
+  if (message.author.id === counting.lastUserId) {
+    await message.react('❌').catch(() => {});
+    await message.delete().catch(() => {});
+    return message.channel.send('❌ Du darfst nicht zweimal hintereinander zählen!').then(msg => setTimeout(() => msg.delete().catch(() => {}), 3000));
+  }
+
+  if (num !== counting.current + 1) {
+    await message.react('❌').catch(() => {});
+    await message.delete().catch(() => {});
+    counting.current = 0;
+    counting.lastUserId = null;
+    return message.channel.send('❌ Falsche Zahl! Das Zählen wurde zurückgesetzt.').then(msg => setTimeout(() => msg.delete().catch(() => {}), 5000));
+  }
+
+  counting.current = num;
+  counting.lastUserId = message.author.id;
+  await message.react('✅').catch(() => {});
+});
+// ---------- Login ----------
+client.login(TOKEN);
